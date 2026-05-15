@@ -275,7 +275,7 @@ console.print(
 )
 
 # %% [markdown]
-# ## 10 min - Quality Checks and Filtering
+# ## 15-25 min - Quality Checks and Filtering
 #
 # Rather than binary pass/fail checks we compute per-image statistics and
 # visualise their distributions. Inspect the histograms, then adjust the
@@ -330,6 +330,10 @@ MIN_BLUR: float | None = 20.0
 MIN_BRIGHTNESS: float | None = 25.0
 MAX_BRIGHTNESS: float | None = 235.0
 
+# Camera angles and depth ranges excluded from the evaluation set.
+EXCLUDE_CAMERA_ANGLES: set[str] = {"top_down", "worms_eye"}
+EXCLUDE_DEPTH_RANGES: set[str] = {"close_up"}
+
 blur_ok = df_curated["blur_score"].isna() | (
     MIN_BLUR is None or df_curated["blur_score"] >= MIN_BLUR
 )
@@ -337,7 +341,13 @@ brightness_ok = df_curated["brightness"].isna() | (
     (MIN_BRIGHTNESS is None or df_curated["brightness"] >= MIN_BRIGHTNESS)
     & (MAX_BRIGHTNESS is None or df_curated["brightness"] <= MAX_BRIGHTNESS)
 )
-keep_mask = blur_ok & brightness_ok
+angle_ok = df_curated["camera_angle"].isna() | ~df_curated["camera_angle"].isin(
+    EXCLUDE_CAMERA_ANGLES
+)
+depth_ok = df_curated["depth_range"].isna() | ~df_curated["depth_range"].isin(
+    EXCLUDE_DEPTH_RANGES
+)
+keep_mask = blur_ok & brightness_ok & angle_ok & depth_ok
 df_golden = df_curated[keep_mask].copy()
 dropped_n = (~keep_mask).sum()
 
@@ -351,7 +361,7 @@ console.print(
 display(df_golden[sample_cols].head(5))
 
 # %% [markdown]
-# ## 10 min - Test Cases of Interest and Coverage Gaps
+# ## 25-35 min - Test Cases of Interest and Coverage Gaps
 #
 # We analyze coverage across these compact dimensions:
 # - `drone_present`, `drone_visibility`, `background`, `lighting`,
@@ -433,18 +443,21 @@ blur_rows["blur_bucket"] = "blurry"
 # Edit these prompts to try different augmentation styles.
 WEATHER_AUGMENT_PROMPTS = {
     "fog": "same scene with dense fog, low visibility, foggy atmosphere, drone partially obscured",
-    "rain": "same scene with heavy rain, rain streaks on lens, dark overcast sky, wet surfaces",
+    "rain": "same scene with light rain, dark overcast sky, wet surfaces",
     "overcast": "same scene with overcast cloudy sky, grey muted lighting, flat shadows, no direct sunlight",
     "night": "same scene at night, dark sky, navigation lights visible, soft moonlight",
+    "backlight": "same scene with strong backlighting, silhouette effect, bright light source behind drone",
+    "foliage": "same scene with dense foliage, leaves and branches partially obscuring drone",
 }
 
 console.print("\n[bold]Weather augmentation[/bold]")
 # Number of source rows to augment. Each row gets all prompts applied,
 # so total generated = max_source_rows × len(WEATHER_AUGMENT_PROMPTS).
-max_source_rows = cfg.max_augmentation_rows if cfg.max_augmentation_rows > 0 else 2
+max_source_rows = cfg.max_augmentation_rows if cfg.max_augmentation_rows > 0 else 20
 weather_rows = OpenAIImageAugmenter(
     prompts=WEATHER_AUGMENT_PROMPTS,
     cache_dir=cfg.openai_image_cache_dir,
+    max_workers=6,
 ).augment(
     positive_targets,
     cfg.artifact_dir / "augmented" / "weather",
@@ -489,7 +502,7 @@ console.print(
 )
 
 # %% [markdown]
-# ## 10 min - VLM Retrieval Evaluation
+# ## 45-55 min - VLM Retrieval Evaluation
 #
 # We evaluate candidate VLMs as zero-shot image retrievers. For each query
 # the model is shown an image and asked whether it matches — responding with
@@ -517,7 +530,7 @@ SYSTEMS_UNDER_TEST = [
 ]
 
 # Build and display the query set once — shared across all models
-query_specs = QuerySetBuilder(n_queries=5, n_samples=5).build(df_eval_extended)
+query_specs = QuerySetBuilder(n_queries=20, n_samples=5).build(df_eval_extended)
 
 qs_table = Table(title="Evaluation Query Set", box=rich_box.SIMPLE_HEAD)
 qs_table.add_column("ID", style="cyan", no_wrap=True)
@@ -647,16 +660,16 @@ _aug_type = (
     if "augmentation_type" in eval_df.columns
     else pd.Series(pd.NA, index=eval_df.index, dtype=object)
 )
-eval_df["condition"] = (
-    _aug_label
-    .fillna(_aug_type.map({"gaussian_blur": "blur"}))
-    .fillna("original")
-)
+eval_df["condition"] = _aug_label.fillna(
+    _aug_type.map({"gaussian_blur": "blur"})
+).fillna("original")
 
 
 def _condition_metrics(g: pd.DataFrame) -> pd.Series:
     if len(g) < _MIN_CONDITION_SAMPLES:
-        return pd.Series({"precision": float("nan"), "recall": float("nan"), "f1": float("nan")})
+        return pd.Series(
+            {"precision": float("nan"), "recall": float("nan"), "f1": float("nan")}
+        )
     return _query_metrics(g)
 
 
@@ -693,14 +706,3 @@ display(condition_matrix)
 # | `retrieval_results_{model}.jsonl` | Per-frame graded relevance scores per model |
 # | `retrieval_eval_detailed.jsonl` | Per-frame scores joined with full image metadata |
 # | `retrieval_eval_summary_{model}.json` | Per-query and aggregate P/R/F1 per model |
-
-# %%
-artifacts = [
-    {
-        "file": str(f.relative_to(cfg.artifact_dir)),
-        "size_kb": round(f.stat().st_size / 1024, 1),
-    }
-    for f in sorted(cfg.artifact_dir.rglob("*"))
-    if f.is_file()
-]
-display(pd.DataFrame(artifacts))

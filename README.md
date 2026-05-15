@@ -3,6 +3,8 @@
 Demo for building a golden evaluation pipeline
 around a VLM drone-alert triage use case for AI Engineer Singapore Workshop on 15 May 2026.
 
+**Workshop materials:** [Infographic](./workshop-infographic.png) · [Key Takeaways](./workshop-summary.md)
+
 The runnable walkthrough is [`demo.py`](./demo.py), a plain Python file with
 `# %%` cell markers. Step through it in VS Code, Cursor, or any
 Jupyter-compatible editor.

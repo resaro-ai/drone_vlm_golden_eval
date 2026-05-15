@@ -8,6 +8,7 @@ import io
 import os
 import shutil
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -72,12 +73,14 @@ class OpenAIImageAugmenter(Augmenter):
         api_key: str | None = None,
         cache_dir: Path | None = None,
         model: str = "gpt-image-2",
+        max_workers: int = 4,
     ) -> None:
         self.prompts = prompts
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         cache_env = os.environ.get("OPENAI_IMAGE_CACHE_DIR")
         self.cache_dir = cache_dir or (Path(cache_env) if cache_env else None)
         self.model = model
+        self.max_workers = max_workers
         self._client: Any = None
 
     def _ensure_client(self) -> None:
@@ -132,42 +135,50 @@ class OpenAIImageAugmenter(Augmenter):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         source = df if max_rows == 0 else df.head(max_rows)
-        rows: list[Any] = []
 
-        for label, prompt in self.prompts.items():
-            label_rows = 0
-            for _, row in source.iterrows():
-                src = Path(str(row["image_path"]))
-                image_id = str(row["image_id"])
-                out = output_dir / f"{image_id}__{label}.jpg"
+        tasks = [
+            (label, prompt, row)
+            for label, prompt in self.prompts.items()
+            for _, row in source.iterrows()
+        ]
 
-                status = "ok"
-                try:
-                    result_bytes = self._edit_image(src, prompt)
-                    Image.open(io.BytesIO(result_bytes)).convert("RGB").save(out, quality=92)
-                except Exception as exc:
-                    print(f"  OpenAI image '{label}' failed for {image_id}: {exc}")
-                    status = f"failed: {exc}"
+        def _process(task: tuple[str, str, Any]) -> Any:
+            label, prompt, row = task
+            src = Path(str(row["image_path"]))
+            image_id = str(row["image_id"])
+            out = output_dir / f"{image_id}__{label}.jpg"
 
-                new_row = row.copy()
-                new_row["image_id"] = f"{image_id}__openai_{label}"
-                new_row["source_image_id"] = image_id
-                if out.exists():
-                    new_row["image_path"] = str(out)
-                    new_row["augmentation_type"] = self.name
-                    new_row["augment_label"] = label
-                    new_row["is_synthetic"] = True
-                else:
-                    new_row["image_path"] = None
-                    new_row["augmentation_type"] = f"{self.name}_failed"
-                    new_row["augment_label"] = label
-                    new_row["is_synthetic"] = False
-                new_row["openai_augment_status"] = status
-                rows.append(new_row)
-                label_rows += 1
+            status = "ok"
+            try:
+                result_bytes = self._edit_image(src, prompt)
+                Image.open(io.BytesIO(result_bytes)).convert("RGB").save(out, quality=92)
+            except Exception as exc:
+                print(f"  OpenAI image '{label}' failed for {image_id}: {exc}")
+                status = f"failed: {exc}"
 
-            ok_count = sum(1 for r in rows[-label_rows:] if r.get("openai_augment_status") == "ok")
-            print(f"  OpenAI image '{label}': {ok_count}/{label_rows} succeeded")
+            new_row = row.copy()
+            new_row["image_id"] = f"{image_id}__openai_{label}"
+            new_row["source_image_id"] = image_id
+            if out.exists():
+                new_row["image_path"] = str(out)
+                new_row["augmentation_type"] = self.name
+                new_row["augment_label"] = label
+                new_row["is_synthetic"] = True
+            else:
+                new_row["image_path"] = None
+                new_row["augmentation_type"] = f"{self.name}_failed"
+                new_row["augment_label"] = label
+                new_row["is_synthetic"] = False
+            new_row["openai_augment_status"] = status
+            return new_row
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            rows = list(executor.map(_process, tasks))
+
+        for label in self.prompts:
+            label_rows = [r for r in rows if r.get("augment_label") == label]
+            ok_count = sum(1 for r in label_rows if r.get("openai_augment_status") == "ok")
+            print(f"  OpenAI image '{label}': {ok_count}/{len(label_rows)} succeeded")
 
         ok_total = sum(1 for r in rows if r.get("openai_augment_status") == "ok")
         print(f"  OpenAI image total: {ok_total}/{len(rows)} augmented candidates succeeded")

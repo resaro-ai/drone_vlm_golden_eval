@@ -13,10 +13,12 @@ class VLMConnector:
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        max_workers: int = 4,
     ) -> None:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self.base_url = base_url or os.environ.get("OPENAI_BASE_URL")
         self.model = model or os.environ.get("VLM_MODEL", "gpt-4o")
+        self.max_workers = max_workers
         self._client: Any = None  # Lazy init
 
     @property

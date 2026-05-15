@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -135,6 +136,7 @@ class FrameResult:
     query_id: str
     image_id: str
     is_positive: bool
+    raw_response: str
     graded_response: str
     score: int
     retrieved: bool
@@ -310,23 +312,23 @@ def run_retrieval_evaluation(
         print(f"  positives={len(qs.positive_ids)}  negatives={len(qs.negative_ids)}")
 
         prompt = RETRIEVAL_PROMPT.format(query=qs.query_text)
-        query_results: list[FrameResult] = []
 
         frame_list = (
             [(iid, True) for iid in qs.positive_ids]
             + [(iid, False) for iid in qs.negative_ids]
         )
 
-        for image_id, is_positive in frame_list:
+        def _score_frame(item: tuple[str, bool]) -> FrameResult | None:
+            image_id, is_positive = item
             row = id_to_row.get(image_id)
             if row is None:
                 print(f"  ! {image_id}: not in dataset, skipping")
-                continue
+                return None
 
             image_path = Path(str(row["image_path"]))
             if not image_path.exists():
                 print(f"  ! {image_id}: image file missing, skipping")
-                continue
+                return None
 
             raw_response = ""
             try:
@@ -336,22 +338,27 @@ def run_retrieval_evaluation(
                 print(f"  x {image_id}: API error — {exc}")
 
             graded, score = _parse_graded_response(raw_response)
-
             retrieved = score >= RETRIEVAL_THRESHOLD
-
-            label = "pos" if is_positive else "neg"
-            correct = retrieved == is_positive
-            icon = "✓" if correct else "✗"
-            print(f"  {icon} [{label}] {image_id}: {graded!r} → {'retrieved' if retrieved else 'not retrieved'}")
-
-            query_results.append(FrameResult(
+            return FrameResult(
                 query_id=qs.query_id,
                 image_id=image_id,
                 is_positive=is_positive,
+                raw_response=raw_response,
                 graded_response=graded,
                 score=score,
                 retrieved=retrieved,
-            ))
+            )
+
+        max_workers = getattr(connector, "max_workers", 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            scored = list(executor.map(_score_frame, frame_list))
+
+        query_results = [r for r in scored if r is not None]
+
+        for r in query_results:
+            label = "pos" if r.is_positive else "neg"
+            icon = "✓" if r.retrieved == r.is_positive else "✗"
+            print(f"  {icon} [{label}] {r.image_id}: {r.graded_response!r} → {'retrieved' if r.retrieved else 'not retrieved'}")
 
         metrics = _compute_metrics(qs, query_results)
         all_results.extend(query_results)
